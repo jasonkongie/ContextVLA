@@ -337,34 +337,34 @@ def weak_augment(image):
     return image
 
 
-def process_example(prompt, actions, image, fast_tokenizer):
+def process_example(prompt, actions, image, fast_tokenizer, num_frames=8):
     """Processes a single example from the dataset."""
     fast_tokens = fast_tokenizer(actions)
     #vlm_action = map_fast_token_to_vlm_action(fast_tokens[0])
     vlm_action = ''.join([map_fast_token_to_vlm_action(tokens) for tokens in fast_tokens])
 
     if 'base_0_rgb' in image: #libero, bridge
-        main_pixel_values = np.stack([image[f"base_{i}_rgb"] for i in range(8)], axis=0) / 255.0
+        main_pixel_values = np.stack([image[f"base_{i}_rgb"] for i in range(num_frames)], axis=0) / 255.0
         main_pixel_values = torch.tensor(main_pixel_values, dtype=torch.float32)
         main_pixel_values = strong_augment(main_pixel_values)
-        
-        wrist_pixel_values = np.stack([image[f"left_wrist_{i}_rgb"] for i in range(8)], axis=0) / 255.0
+
+        wrist_pixel_values = np.stack([image[f"left_wrist_{i}_rgb"] for i in range(num_frames)], axis=0) / 255.0
         wrist_pixel_values = torch.tensor(wrist_pixel_values, dtype=torch.float32)
         wrist_pixel_values = weak_augment(wrist_pixel_values)
-        
-        right_pixel_values = np.stack([image[f"right_wrist_{i}_rgb"] for i in range(8)], axis=0) / 255.0
+
+        right_pixel_values = np.stack([image[f"right_wrist_{i}_rgb"] for i in range(num_frames)], axis=0) / 255.0
         right_pixel_values = torch.tensor(right_pixel_values, dtype=torch.float32)
         right_pixel_values = weak_augment(right_pixel_values)
     else: #robocasa
-        main_pixel_values = np.stack([image[f"left_{i}_rgb"] for i in range(8)], axis=0) / 255.0
+        main_pixel_values = np.stack([image[f"left_{i}_rgb"] for i in range(num_frames)], axis=0) / 255.0
         main_pixel_values = torch.tensor(main_pixel_values, dtype=torch.float32)
         main_pixel_values = strong_augment(main_pixel_values)
-        
-        wrist_pixel_values = np.stack([image[f"right_{i}_rgb"] for i in range(8)], axis=0) / 255.0
+
+        wrist_pixel_values = np.stack([image[f"right_{i}_rgb"] for i in range(num_frames)], axis=0) / 255.0
         wrist_pixel_values = torch.tensor(wrist_pixel_values, dtype=torch.float32)
         wrist_pixel_values = strong_augment(wrist_pixel_values)
-        
-        right_pixel_values = np.stack([image[f"wrist_{i}_rgb"] for i in range(8)], axis=0) / 255.0
+
+        right_pixel_values = np.stack([image[f"wrist_{i}_rgb"] for i in range(num_frames)], axis=0) / 255.0
         right_pixel_values = torch.tensor(right_pixel_values, dtype=torch.float32)
         right_pixel_values = weak_augment(right_pixel_values)
     
@@ -399,6 +399,7 @@ class TokenizeFASTInputs(DataTransformFn):
     )
     action_horizon: int
     action_dim: int
+    num_frames: int = 8
 
     def __call__(self, data: DataDict) -> DataDict:
         if (prompt := data.pop("prompt", None)) is None:
@@ -406,11 +407,11 @@ class TokenizeFASTInputs(DataTransformFn):
 
         if not isinstance(prompt, str):
             prompt = prompt.item()
-        
+
         self.fast_tokenizer.time_horizon = self.action_horizon
         self.fast_tokenizer.action_dim = self.action_dim
 
-        message = process_example(prompt, data["actions"], data["image"], self.fast_tokenizer)
+        message = process_example(prompt, data["actions"], data["image"], self.fast_tokenizer, num_frames=self.num_frames)
 
         return message
 

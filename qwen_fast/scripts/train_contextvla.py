@@ -240,6 +240,8 @@ def train_loop(config: _config.TrainConfig):
     model = modeling_contextvla.ContextVLA_Qwen2_5_VL.from_pretrained(
         "huiwon/ContextVLA-3B-Qwen2.5VL-FAST",
         attn_implementation="flash_attention_2",
+        num_frames=data_config.num_frames,
+        num_views=len(data_config.observation_keys),
     ).to(dtype=torch.bfloat16)
     model.train()
 

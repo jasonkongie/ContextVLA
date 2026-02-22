@@ -101,13 +101,14 @@ class ModelTransformFactory(GroupFactory):
 
     # If provided, will determine the default prompt that be used by the model.
     default_prompt: str | None = None
+    num_frames: int = 8
 
     def __call__(self, model_config: ModelConfig) -> _transforms.Group:
         return _transforms.Group(
             inputs=[
                 _transforms.InjectDefaultPrompt(self.default_prompt),
                 _transforms.ResizeImages(224, 224),
-                _transforms.TokenizeFASTInputs(model_config.action_horizon, model_config.action_dim),
+                _transforms.TokenizeFASTInputs(model_config.action_horizon, model_config.action_dim, num_frames=self.num_frames),
             ],
             outputs=[
                 _transforms.ExtractFASTActions(
@@ -184,6 +185,8 @@ class SimpleDataConfig(DataConfigFactory):
 class LeRobotRobocasaDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: ModelConfig) -> DataConfig:
+        num_frames = self.base_config.num_frames if self.base_config is not None else 8
+
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform({
@@ -201,9 +204,9 @@ class LeRobotRobocasaDataConfig(DataConfigFactory):
             inputs=[robocasa_policy.RobocasaInputs(action_dim=model_config.action_dim)],
             outputs=[robocasa_policy.RobocasaOutputs()],
         )
-        
-        model_transforms = ModelTransformFactory()(model_config)
-        
+
+        model_transforms = ModelTransformFactory(num_frames=num_frames)(model_config)
+
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
             repack_transforms=repack_transform,
@@ -217,6 +220,8 @@ class LeRobotRobocasaDataConfig(DataConfigFactory):
 class LeRobotBridgeDataConfig(DataConfigFactory):
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: ModelConfig) -> DataConfig:
+        num_frames = self.base_config.num_frames if self.base_config is not None else 8
+
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -235,7 +240,7 @@ class LeRobotBridgeDataConfig(DataConfigFactory):
             outputs=[bridge_policy.BridgeOutputs()],
         )
 
-        model_transforms = ModelTransformFactory()(model_config)
+        model_transforms = ModelTransformFactory(num_frames=num_frames)(model_config)
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -250,6 +255,8 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: ModelConfig) -> DataConfig:
+        num_frames = self.base_config.num_frames if self.base_config is not None else 8
+
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -269,7 +276,7 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             outputs=[libero_policy.LiberoOutputs()],
         )
 
-        model_transforms = ModelTransformFactory()(model_config)
+        model_transforms = ModelTransformFactory(num_frames=num_frames)(model_config)
 
         return dataclasses.replace(
             self.create_base_config(assets_dirs, model_config),
@@ -411,6 +418,75 @@ _CONFIGS = [
             )
         ),
         num_train_steps=60000,
+        batch_size=32
+    ),
+    # Context-length sweep on Libero: frames = 4, 8, 12, 16
+    TrainConfig(
+        name="contextvla_libero_ctx4",
+        model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
+        data=LeRobotLiberoDataConfig(
+            repo_id="huiwon/libero",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                num_frames=4,
+            ),
+            assets=AssetsConfig(
+                assets_dir="./assets",
+                asset_id="libero",
+            )
+        ),
+        num_train_steps=30000,
+        batch_size=32
+    ),
+    TrainConfig(
+        name="contextvla_libero_ctx8",
+        model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
+        data=LeRobotLiberoDataConfig(
+            repo_id="huiwon/libero",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                num_frames=8,
+            ),
+            assets=AssetsConfig(
+                assets_dir="./assets",
+                asset_id="libero",
+            )
+        ),
+        num_train_steps=30000,
+        batch_size=32
+    ),
+    TrainConfig(
+        name="contextvla_libero_ctx12",
+        model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
+        data=LeRobotLiberoDataConfig(
+            repo_id="huiwon/libero",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                num_frames=12,
+            ),
+            assets=AssetsConfig(
+                assets_dir="./assets",
+                asset_id="libero",
+            )
+        ),
+        num_train_steps=30000,
+        batch_size=32
+    ),
+    TrainConfig(
+        name="contextvla_libero_ctx16",
+        model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
+        data=LeRobotLiberoDataConfig(
+            repo_id="huiwon/libero",
+            base_config=DataConfig(
+                prompt_from_task=True,
+                num_frames=16,
+            ),
+            assets=AssetsConfig(
+                assets_dir="./assets",
+                asset_id="libero",
+            )
+        ),
+        num_train_steps=30000,
         batch_size=32
     ),
 ]

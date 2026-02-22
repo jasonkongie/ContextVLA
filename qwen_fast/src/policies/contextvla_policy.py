@@ -1,6 +1,6 @@
 import numpy as np
 from openpi_client import base_policy as _base_policy
-from src.models import layer_wrapper, vision_process
+from src.models import layer_wrapper, vision_process, modeling_contextvla
 import torch
 import torch.nn as nn
 import json
@@ -25,11 +25,13 @@ def arrays_equal_values(a: np.ndarray, b: np.ndarray) -> bool:
 
 class ContextVLAPolicy(_base_policy.BasePolicy):
     def __init__(
-            self, 
-            ckpt_path, 
-            norm_stats_file_path, 
-            action_dim=7, 
+            self,
+            ckpt_path,
+            norm_stats_file_path,
+            action_dim=7,
             time_horizon=10,
+            num_frames=8,
+            num_views=3,
             device='cuda'):
         super().__init__()
         with open(norm_stats_file_path, "r") as f:
@@ -38,13 +40,15 @@ class ContextVLAPolicy(_base_policy.BasePolicy):
         self.action_high = self.action_high[:action_dim]
         self.action_low  = self.action_low[:action_dim]
 
-        self.load_model(ckpt_path, action_dim=action_dim, time_horizon=time_horizon, device=device)
+        self.load_model(ckpt_path, action_dim=action_dim, time_horizon=time_horizon,
+                        num_frames=num_frames, num_views=num_views, device=device)
         self.error_action = np.zeros((time_horizon, action_dim))
 
-    def load_model(self, ckpt_path = None, action_dim: int = 7, time_horizon: int = 10, device: str = 'cuda'):
+    def load_model(self, ckpt_path=None, action_dim: int = 7, time_horizon: int = 10,
+                   num_frames: int = 8, num_views: int = 3, device: str = 'cuda'):
         self.processor = AutoProcessor.from_pretrained("huiwon/ContextVLA-3B-Qwen2.5VL-FAST", use_fast=True)
         self.processor.tokenizer.padding_side = 'left'
-        
+
         self.fast_tokenizer = AutoProcessor.from_pretrained(
             "physical-intelligence/fast", trust_remote_code=True
         )
@@ -52,8 +56,10 @@ class ContextVLAPolicy(_base_policy.BasePolicy):
         self.fast_tokenizer.action_dim = action_dim
 
         self.model = modeling_contextvla.ContextVLA_Qwen2_5_VL.from_pretrained(
-            "huiwon/ContextVLA-3B-Qwen2.5VL-FAST",
+            ckpt_path,
             attn_implementation="flash_attention_2",
+            num_frames=num_frames,
+            num_views=num_views,
             dtype=torch.bfloat16
         ).to(device)
 

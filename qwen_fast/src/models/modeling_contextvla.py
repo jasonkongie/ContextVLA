@@ -21,6 +21,8 @@ class IndexContext:
 class ContextVLA_Qwen2_5_VL(Qwen2_5_VLForConditionalGeneration):
     @classmethod
     def from_pretrained(cls, pretrained_model_name_or_path, **kwargs):
+        num_frames = kwargs.pop("num_frames", 8)
+        num_views = kwargs.pop("num_views", 3)
 
         base_config = AutoConfig.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
         model = Qwen2_5_VLForConditionalGeneration._from_config(base_config, **kwargs)
@@ -31,8 +33,8 @@ class ContextVLA_Qwen2_5_VL(Qwen2_5_VLForConditionalGeneration):
                 model.model.layers[layer_idx],
                 layer_idx=layer_idx,
                 internal_projection=2,
-                num_frames=8,
-                num_views=3,
+                num_frames=num_frames,
+                num_views=num_views,
                 index_context=index_context,
                 img_pattern=[151652],
                 motion_token=1,
