@@ -60,8 +60,7 @@ class ContextVLAPolicy(_base_policy.BasePolicy):
             attn_implementation="flash_attention_2",
             num_frames=num_frames,
             num_views=num_views,
-            dtype=torch.bfloat16
-        ).to(device)
+        ).to(dtype=torch.bfloat16).to(device)
 
     def array_to_pil_image(self, frame):
         # frame shape: (C, H, W) -> (H, W, C)
