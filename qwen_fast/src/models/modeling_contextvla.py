@@ -25,6 +25,7 @@ class ContextVLA_Qwen2_5_VL(Qwen2_5_VLForConditionalGeneration):
         num_views = kwargs.pop("num_views", 3)
 
         base_config = AutoConfig.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
+        kwargs.setdefault("torch_dtype", torch.bfloat16)
         model = Qwen2_5_VLForConditionalGeneration._from_config(base_config, **kwargs)
 
         index_context = IndexContext()

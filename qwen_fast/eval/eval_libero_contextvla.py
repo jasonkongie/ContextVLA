@@ -32,10 +32,15 @@ import tqdm
 import tyro
 
 # ---------------------------------------------------------------------------
-# Make sure we can import from the qwen_fast/ src tree regardless of cwd
+# Make sure we can import from the qwen_fast/ src tree regardless of cwd.
+# IMPORTANT: append (not insert at 0) so site-packages takes priority,
+# preventing qwen_fast/ from shadowing installed packages like libero.
 # ---------------------------------------------------------------------------
-sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+sys.path.append(str(pathlib.Path(__file__).resolve().parents[1]))
 
+from libero.libero import benchmark as _libero_benchmark
+from libero.libero import get_libero_path as _get_libero_path
+from libero.libero.envs import OffScreenRenderEnv as _OffScreenRenderEnv
 from src.policies.contextvla_policy import ContextVLAPolicy
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
@@ -135,12 +140,9 @@ def _preprocess_image(raw_img: np.ndarray) -> np.ndarray:
 
 def _get_libero_env(task, resolution: int, seed: int):
     """Initialise a LIBERO OffScreenRenderEnv and return (env, task_description)."""
-    from libero.libero import get_libero_path
-    from libero.libero.envs import OffScreenRenderEnv
-
     task_description = task.language
     task_bddl_file = (
-        pathlib.Path(get_libero_path("bddl_files"))
+        pathlib.Path(_get_libero_path("bddl_files"))
         / task.problem_folder
         / task.bddl_file
     )
@@ -149,7 +151,7 @@ def _get_libero_env(task, resolution: int, seed: int):
         "camera_heights": resolution,
         "camera_widths": resolution,
     }
-    env = OffScreenRenderEnv(**env_args)
+    env = _OffScreenRenderEnv(**env_args)
     env.seed(seed)
     return env, task_description
 
@@ -196,8 +198,7 @@ def eval_libero(args: Args) -> dict:
     # Load LIBERO task suite
     # ------------------------------------------------------------------
     np.random.seed(args.seed)
-    from libero.libero import benchmark
-    benchmark_dict = benchmark.get_benchmark_dict()
+    benchmark_dict = _libero_benchmark.get_benchmark_dict()
     task_suite = benchmark_dict[args.task_suite_name]()
     num_tasks = task_suite.n_tasks
     logging.info(f"Task suite '{args.task_suite_name}' — {num_tasks} tasks.")
