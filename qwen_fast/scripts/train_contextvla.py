@@ -129,12 +129,12 @@ def get_model_parameters(model):
 
 def save_checkpoint(model, optimizer, global_step, config, is_main, data_config):
     """Save a checkpoint with model state, optimizer state, and metadata."""
-    print(f"Saving checkpoint at step {global_step}, {config.num_train_steps}")
     if not is_main:
         return
 
     # Only save if it's time to save or if it's the final step
     if (global_step % config.save_interval == 0 and global_step > 0) or global_step >= config.num_train_steps - 1:
+        print(f"Saving checkpoint at step {global_step}")
         # Create temporary directory for atomic checkpoint saving
         final_ckpt_dir = config.checkpoint_dir / f"{global_step}"
         tmp_ckpt_dir = config.checkpoint_dir / f"tmp_{global_step}"
@@ -244,6 +244,7 @@ def train_loop(config: _config.TrainConfig):
         num_views=len(data_config.observation_keys),
     ).to(dtype=torch.bfloat16)
     model.train()
+    model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})  # saves ~50% VRAM; use_reentrant=False avoids DDP "variable ready twice" error
 
     # Enable memory optimizations for large-scale training
     if world_size >= 8:

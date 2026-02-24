@@ -4,7 +4,7 @@ import os
 from huggingface_hub import snapshot_download
 
 from transformers.modeling_utils import load_sharded_checkpoint
-from transformers import AutoConfig
+from transformers.models.qwen2_5_vl.configuration_qwen2_5_vl import Qwen2_5_VLConfig
 
 from src.models.modeling_qwen2_5_vl import Qwen2_5_VLForConditionalGeneration
 
@@ -24,7 +24,7 @@ class ContextVLA_Qwen2_5_VL(Qwen2_5_VLForConditionalGeneration):
         num_frames = kwargs.pop("num_frames", 8)
         num_views = kwargs.pop("num_views", 3)
 
-        base_config = AutoConfig.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
+        base_config = Qwen2_5_VLConfig.from_pretrained("Qwen/Qwen2.5-VL-3B-Instruct")
         kwargs.setdefault("torch_dtype", torch.bfloat16)
         model = Qwen2_5_VLForConditionalGeneration._from_config(base_config, **kwargs)
 

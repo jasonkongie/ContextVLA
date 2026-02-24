@@ -361,4 +361,5 @@ def eval_libero(args: Args) -> dict:
 # Entry point
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    tyro.cli(eval_libero)
+    args = tyro.cli(Args)
+    eval_libero(args)

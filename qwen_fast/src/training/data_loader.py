@@ -11,6 +11,7 @@ import torch
 from functools import partial
 
 from transformers import AutoProcessor
+from transformers import Qwen2VLProcessor
 
 import src.training.config as _config
 import src.transforms as _transforms
@@ -247,7 +248,10 @@ class TorchDataLoader:
         generator = torch.Generator()
         generator.manual_seed(seed)
 
-        processor = AutoProcessor.from_pretrained("huiwon/ContextVLA-3B-Qwen2.5VL-FAST", use_fast=True)
+        # Use Qwen2VLProcessor directly instead of AutoProcessor because
+        # transformers 4.47.x doesn't recognize Qwen2_5_VLProcessor and falls back
+        # to a plain tokenizer. Qwen2VLProcessor is functionally compatible.
+        processor = Qwen2VLProcessor.from_pretrained("huiwon/ContextVLA-3B-Qwen2.5VL-FAST")
         processor.tokenizer.padding_side = 'left'
 
         self._data_loader = torch.utils.data.DataLoader(

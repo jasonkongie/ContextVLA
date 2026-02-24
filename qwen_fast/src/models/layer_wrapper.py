@@ -37,11 +37,25 @@ class LayerWrapper(nn.Module):
 
         return begin_idx, end_idx
 
-    def forward(self, hidden_states, *args, **kwargs):
+    def forward(self, hidden_states, attention_mask=None, position_ids=None,
+                past_key_value=None, output_attentions=False, use_cache=False,
+                cache_position=None, position_embeddings=None, **kwargs):
+        # Merge explicit positional params back into kwargs for downstream compatibility.
+        # gradient_checkpointing_func passes all args positionally (not as kwargs),
+        # so we must accept them explicitly to avoid KeyError when accessing kwargs.
+        if attention_mask is not None:
+            kwargs['attention_mask'] = attention_mask
+        if position_ids is not None:
+            kwargs['position_ids'] = position_ids
+        if cache_position is not None:
+            kwargs['cache_position'] = cache_position
+        if position_embeddings is not None:
+            kwargs['position_embeddings'] = position_embeddings
+
         if hidden_states.shape[1] > 1:
-            self.position_ids = kwargs['position_ids']
-            self.cache_position = kwargs['cache_position']
-            self.position_embeddings = kwargs['position_embeddings']
+            self.position_ids = kwargs.get('position_ids')
+            self.cache_position = kwargs.get('cache_position')
+            self.position_embeddings = kwargs.get('position_embeddings')
 
             if self.layer_idx == self.internal_projection:
                 bsz, seq_len, dim = hidden_states.shape
@@ -110,4 +124,6 @@ class LayerWrapper(nn.Module):
                 kwargs['position_embeddings'] = (self.position_embeddings[0][:, :, self.compressed_length].unsqueeze(-2), self.position_embeddings[1][:, :, self.compressed_length].unsqueeze(-2))
                 self.compressed_length += 1
 
-        return self.layer(hidden_states, *args, **kwargs)
+        return self.layer(hidden_states, past_key_value=past_key_value,
+                          output_attentions=output_attentions, use_cache=use_cache,
+                          **kwargs)

@@ -261,10 +261,10 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "observation/image": "observation.images.front_view",
-                        "observation/wrist_image": "observation.images.left_wrist_view",
-                        "observation/state": "observation.state",
-                        "actions": "action",
+                        "observation/image": "image",
+                        "observation/wrist_image": "wrist_image",
+                        "observation/state": "state",
+                        "actions": "actions",
                         "prompt": "prompt",
                     }
                 )
@@ -370,9 +370,11 @@ _CONFIGS = [
         name="contextvla_libero",
         model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
         data=LeRobotLiberoDataConfig(
-            repo_id="huiwon/libero",
+            repo_id="physical-intelligence/libero",
             base_config=DataConfig(
-                prompt_from_task=True
+                prompt_from_task=True,
+                observation_keys=("image", "wrist_image"),
+                action_sequence_keys=("actions",),
             ),
             assets=AssetsConfig(
                 assets_dir="./assets",
@@ -425,10 +427,12 @@ _CONFIGS = [
         name="contextvla_libero_ctx4",
         model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
         data=LeRobotLiberoDataConfig(
-            repo_id="huiwon/libero",
+            repo_id="physical-intelligence/libero",
             base_config=DataConfig(
                 prompt_from_task=True,
                 num_frames=4,
+                observation_keys=("image", "wrist_image"),
+                action_sequence_keys=("actions",),
             ),
             assets=AssetsConfig(
                 assets_dir="./assets",
@@ -442,10 +446,12 @@ _CONFIGS = [
         name="contextvla_libero_ctx8",
         model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
         data=LeRobotLiberoDataConfig(
-            repo_id="huiwon/libero",
+            repo_id="physical-intelligence/libero",
             base_config=DataConfig(
                 prompt_from_task=True,
                 num_frames=8,
+                observation_keys=("image", "wrist_image"),
+                action_sequence_keys=("actions",),
             ),
             assets=AssetsConfig(
                 assets_dir="./assets",
@@ -459,10 +465,12 @@ _CONFIGS = [
         name="contextvla_libero_ctx12",
         model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
         data=LeRobotLiberoDataConfig(
-            repo_id="huiwon/libero",
+            repo_id="physical-intelligence/libero",
             base_config=DataConfig(
                 prompt_from_task=True,
                 num_frames=12,
+                observation_keys=("image", "wrist_image"),
+                action_sequence_keys=("actions",),
             ),
             assets=AssetsConfig(
                 assets_dir="./assets",
@@ -476,10 +484,12 @@ _CONFIGS = [
         name="contextvla_libero_ctx16",
         model=ModelConfig(action_dim=7, action_horizon=10, max_token_len=180),
         data=LeRobotLiberoDataConfig(
-            repo_id="huiwon/libero",
+            repo_id="physical-intelligence/libero",
             base_config=DataConfig(
                 prompt_from_task=True,
                 num_frames=16,
+                observation_keys=("image", "wrist_image"),
+                action_sequence_keys=("actions",),
             ),
             assets=AssetsConfig(
                 assets_dir="./assets",
