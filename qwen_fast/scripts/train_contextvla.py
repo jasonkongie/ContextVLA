@@ -2,6 +2,7 @@ import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 import dataclasses
+import datetime
 import gc
 import logging
 import os
@@ -77,7 +78,7 @@ def setup_ddp():
     use_ddp = world_size > 1
     if use_ddp and not torch.distributed.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
-        torch.distributed.init_process_group(backend=backend, init_method="env://")
+        torch.distributed.init_process_group(backend=backend, init_method="env://", timeout=datetime.timedelta(seconds=3600))
 
         # Set up debugging environment variables for DDP issues
         if os.environ.get("TORCH_DISTRIBUTED_DEBUG") is None:
@@ -261,7 +262,7 @@ def train_loop(config: _config.TrainConfig):
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[device.index] if device.type == "cuda" else None,
-            find_unused_parameters=True,  # Disable for memory efficiency
+            find_unused_parameters=False,  # False = no extra graph traversal each step (faster)
             gradient_as_bucket_view=True,  # Enable for memory efficiency
             static_graph=world_size >= 8,  # Enable for 8+ GPUs
         )
@@ -422,7 +423,11 @@ def train_loop(config: _config.TrainConfig):
 
             # Save checkpoint using the new mechanism
             if (global_step + 1) % accum_steps == 0:
+                if use_ddp:
+                    dist.barrier()  # all ranks pause before rank 0 saves
                 save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)
+                if use_ddp:
+                    dist.barrier()  # all ranks wait for rank 0 to finish saving
         
             global_step += 1
 

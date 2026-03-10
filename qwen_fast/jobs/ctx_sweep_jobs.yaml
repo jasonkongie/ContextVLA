@@ -1,0 +1,695 @@
+# ContextVLA context-length sweep — 4 independent Kubernetes Jobs
+# Each job trains one context length (4, 8, 12, 16) on 4x A100.
+#
+# Prerequisites (run once on your local machine):
+#   kubectl create secret generic hf-token --from-literal=token=hf_YOUR_TOKEN -n seelab
+#
+# Submit all 4 jobs at once:
+#   kubectl apply -f jobs/ctx_sweep_jobs.yaml -n seelab
+#
+# Monitor:
+#   kubectl get jobs -n seelab | grep jason-ctx
+#   kubectl logs -f job/jason-ctx4-train -n seelab
+#   kubectl logs -f job/jason-ctx8-train -n seelab
+#   kubectl logs -f job/jason-ctx12-train -n seelab
+#   kubectl logs -f job/jason-ctx16-train -n seelab
+
+# ===========================================================
+# Shared setup script embedded in each job (bash heredoc)
+# ===========================================================
+# Steps:
+#   1. Source miniforge3 (already on image at /workspace/miniforge3)
+#   2. Create contextvla conda env (python 3.11)
+#   3. Install pip packages
+#   4. Clone repo to /workspace/ContextVLA
+#   5. Apply patches (idempotent)
+#   6. HF login
+#   7. Run torchrun
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: jason-ctx4-train
+  namespace: seelab
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: ctx-train
+    spec:
+      restartPolicy: Never
+      tolerations:
+      - key: nautilus.io/hardware
+        operator: Equal
+        value: large-gpu
+        effect: NoSchedule
+      containers:
+      - name: ctx-train
+        image: ghcr.io/tilmto/hymba:v1
+        resources:
+          limits:
+            nvidia.com/a100: 4
+            memory: 256Gi
+            cpu: 32
+          requests:
+            nvidia.com/a100: 4
+            memory: 256Gi
+            cpu: 32
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+        - name: MUJOCO_GL
+          value: osmesa
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+        - name: CTX
+          value: "4"
+        - name: CTX_CONFIG
+          value: "contextvla_libero_ctx4"
+        - name: EXP_NAME
+          value: "ctx4_libero"
+        - name: CKPT_DIR
+          value: "/mymnt/checkpoints/ctx_sweep/ctx4"
+        command:
+        - bash
+        - -c
+        - |
+          set -euo pipefail
+          echo "=== [ctx4] Starting setup ==="
+
+          # 1. Conda
+          source /workspace/miniforge3/etc/profile.d/conda.sh
+          conda create -y -n contextvla python=3.11
+          conda activate contextvla
+
+          # 2. PyTorch + deps
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+          pip install \
+            transformers==4.53.2 safetensors wandb numpy==1.26.4 \
+            tqdm tqdm-loggable einops packaging etils beartype \
+            jaxtyping tyro pillow requests
+          pip install lerobot
+          pip install flash-attn --no-build-isolation
+
+          # 3. Clone repo
+          git clone https://github.com/jasonkongie/ContextVLA.git /workspace/ContextVLA
+          cd /workspace/ContextVLA/qwen_fast
+
+          # 4. Patch layer_wrapper.py (idempotent)
+          python - << 'PYEOF'
+          import sys
+          text = open('src/models/layer_wrapper.py').read()
+          old = """    def forward(self, hidden_states, *args, **kwargs):
+              if hidden_states.shape[1] > 1:
+                  self.position_ids = kwargs['position_ids']
+                  self.cache_position = kwargs['cache_position']
+                  self.position_embeddings = kwargs['position_embeddings']"""
+          new = """    def forward(self, hidden_states, attention_mask=None, position_ids=None,
+                          past_key_value=None, output_attentions=False, use_cache=False,
+                          cache_position=None, position_embeddings=None, **kwargs):
+              if attention_mask is not None: kwargs['attention_mask'] = attention_mask
+              if position_ids is not None: kwargs['position_ids'] = position_ids
+              if cache_position is not None: kwargs['cache_position'] = cache_position
+              if position_embeddings is not None: kwargs['position_embeddings'] = position_embeddings
+              if hidden_states.shape[1] > 1:
+                  self.position_ids = kwargs.get('position_ids')
+                  self.cache_position = kwargs.get('cache_position')
+                  self.position_embeddings = kwargs.get('position_embeddings')"""
+          if old in text:
+              text = text.replace(old, new)
+              text = text.replace(
+                  '        return self.layer(hidden_states, *args, **kwargs)',
+                  '        return self.layer(hidden_states, past_key_value=past_key_value, output_attentions=output_attentions, use_cache=use_cache, **kwargs)'
+              )
+              open('src/models/layer_wrapper.py', 'w').write(text)
+              print('layer_wrapper.py patched OK')
+          else:
+              print('layer_wrapper.py already patched, skipping')
+          PYEOF
+
+          # 5. Patch train_contextvla.py (idempotent)
+          python - << 'PYEOF'
+          text = open('scripts/train_contextvla.py').read()
+          changed = False
+
+          # datetime import
+          if 'import datetime' not in text:
+              text = text.replace('import dataclasses\nimport gc', 'import dataclasses\nimport datetime\nimport gc')
+              changed = True; print('datetime import added')
+
+          # NCCL timeout
+          old_nccl = 'torch.distributed.init_process_group(backend=backend, init_method="env://")'
+          new_nccl = 'torch.distributed.init_process_group(backend=backend, init_method="env://", timeout=datetime.timedelta(seconds=3600))'
+          if old_nccl in text:
+              text = text.replace(old_nccl, new_nccl)
+              changed = True; print('NCCL timeout patched')
+
+          # gradient checkpointing use_reentrant=False
+          old_gc = 'model.gradient_checkpointing_enable()'
+          new_gc = 'model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})'
+          if old_gc in text:
+              text = text.replace(old_gc, new_gc)
+              changed = True; print('gradient_checkpointing_enable patched')
+
+          # find_unused_parameters
+          if 'find_unused_parameters=True' in text:
+              text = text.replace('find_unused_parameters=True', 'find_unused_parameters=False')
+              changed = True; print('find_unused_parameters patched')
+
+          # dist.barrier around checkpoint save
+          old_ckpt = '            # Save checkpoint using the new mechanism\n            if (global_step + 1) % accum_steps == 0:\n                save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)'
+          new_ckpt = '            # Save checkpoint using the new mechanism\n            if (global_step + 1) % accum_steps == 0:\n                if use_ddp:\n                    dist.barrier()\n                save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)\n                if use_ddp:\n                    dist.barrier()'
+          if old_ckpt in text:
+              text = text.replace(old_ckpt, new_ckpt)
+              changed = True; print('dist.barrier checkpoint patch applied')
+
+          # noisy print fix
+          old_print = '    print(f"Saving checkpoint at step {global_step}, {config.num_train_steps}")\n    if not is_main:\n        return\n\n    # Only save if'
+          new_print = '    if not is_main:\n        return\n\n    # Only save if'
+          if old_print in text:
+              text = text.replace(old_print, new_print)
+              changed = True; print('noisy print patched')
+
+          if changed:
+              open('scripts/train_contextvla.py', 'w').write(text)
+          else:
+              print('train_contextvla.py already patched, skipping')
+          PYEOF
+
+          # 6. HuggingFace login
+          huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential
+
+          # 7. Run training
+          mkdir -p "$CKPT_DIR"
+          echo "=== [ctx4] Starting training ==="
+          torchrun \
+            --standalone \
+            --nnodes=1 \
+            --nproc_per_node=4 \
+            --master_port=19001 \
+            scripts/train_contextvla.py "$CTX_CONFIG" \
+            --exp-name="$EXP_NAME" \
+            --num-train-steps=10000 \
+            --batch-size=16 \
+            --accum-steps=2 \
+            --checkpoint-base-dir="$CKPT_DIR" \
+            --no-resume
+          echo "=== [ctx4] Training complete ==="
+        volumeMounts:
+        - name: jasonkong-volume
+          mountPath: /mymnt
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: jasonkong-volume
+        persistentVolumeClaim:
+          claimName: jasonkong-volume
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: jason-ctx8-train
+  namespace: seelab
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: ctx-train
+    spec:
+      restartPolicy: Never
+      tolerations:
+      - key: nautilus.io/hardware
+        operator: Equal
+        value: large-gpu
+        effect: NoSchedule
+      containers:
+      - name: ctx-train
+        image: ghcr.io/tilmto/hymba:v1
+        resources:
+          limits:
+            nvidia.com/a100: 4
+            memory: 256Gi
+            cpu: 32
+          requests:
+            nvidia.com/a100: 4
+            memory: 256Gi
+            cpu: 32
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+        - name: MUJOCO_GL
+          value: osmesa
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+        - name: CTX
+          value: "8"
+        - name: CTX_CONFIG
+          value: "contextvla_libero_ctx8"
+        - name: EXP_NAME
+          value: "ctx8_libero"
+        - name: CKPT_DIR
+          value: "/mymnt/checkpoints/ctx_sweep/ctx8"
+        command:
+        - bash
+        - -c
+        - |
+          set -euo pipefail
+          echo "=== [ctx8] Starting setup ==="
+
+          source /workspace/miniforge3/etc/profile.d/conda.sh
+          conda create -y -n contextvla python=3.11
+          conda activate contextvla
+
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+          pip install \
+            transformers==4.53.2 safetensors wandb numpy==1.26.4 \
+            tqdm tqdm-loggable einops packaging etils beartype \
+            jaxtyping tyro pillow requests
+          pip install lerobot
+          pip install flash-attn --no-build-isolation
+
+          git clone https://github.com/jasonkongie/ContextVLA.git /workspace/ContextVLA
+          cd /workspace/ContextVLA/qwen_fast
+
+          python - << 'PYEOF'
+          import sys
+          text = open('src/models/layer_wrapper.py').read()
+          old = """    def forward(self, hidden_states, *args, **kwargs):
+              if hidden_states.shape[1] > 1:
+                  self.position_ids = kwargs['position_ids']
+                  self.cache_position = kwargs['cache_position']
+                  self.position_embeddings = kwargs['position_embeddings']"""
+          new = """    def forward(self, hidden_states, attention_mask=None, position_ids=None,
+                          past_key_value=None, output_attentions=False, use_cache=False,
+                          cache_position=None, position_embeddings=None, **kwargs):
+              if attention_mask is not None: kwargs['attention_mask'] = attention_mask
+              if position_ids is not None: kwargs['position_ids'] = position_ids
+              if cache_position is not None: kwargs['cache_position'] = cache_position
+              if position_embeddings is not None: kwargs['position_embeddings'] = position_embeddings
+              if hidden_states.shape[1] > 1:
+                  self.position_ids = kwargs.get('position_ids')
+                  self.cache_position = kwargs.get('cache_position')
+                  self.position_embeddings = kwargs.get('position_embeddings')"""
+          if old in text:
+              text = text.replace(old, new)
+              text = text.replace(
+                  '        return self.layer(hidden_states, *args, **kwargs)',
+                  '        return self.layer(hidden_states, past_key_value=past_key_value, output_attentions=output_attentions, use_cache=use_cache, **kwargs)'
+              )
+              open('src/models/layer_wrapper.py', 'w').write(text)
+              print('layer_wrapper.py patched OK')
+          else:
+              print('layer_wrapper.py already patched, skipping')
+          PYEOF
+
+          python - << 'PYEOF'
+          text = open('scripts/train_contextvla.py').read()
+          changed = False
+          if 'import datetime' not in text:
+              text = text.replace('import dataclasses\nimport gc', 'import dataclasses\nimport datetime\nimport gc')
+              changed = True
+          old_nccl = 'torch.distributed.init_process_group(backend=backend, init_method="env://")'
+          new_nccl = 'torch.distributed.init_process_group(backend=backend, init_method="env://", timeout=datetime.timedelta(seconds=3600))'
+          if old_nccl in text:
+              text = text.replace(old_nccl, new_nccl); changed = True
+          if 'model.gradient_checkpointing_enable()' in text:
+              text = text.replace('model.gradient_checkpointing_enable()', 'model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})'); changed = True
+          if 'find_unused_parameters=True' in text:
+              text = text.replace('find_unused_parameters=True', 'find_unused_parameters=False'); changed = True
+          old_ckpt = '            # Save checkpoint using the new mechanism\n            if (global_step + 1) % accum_steps == 0:\n                save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)'
+          new_ckpt = '            # Save checkpoint using the new mechanism\n            if (global_step + 1) % accum_steps == 0:\n                if use_ddp:\n                    dist.barrier()\n                save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)\n                if use_ddp:\n                    dist.barrier()'
+          if old_ckpt in text:
+              text = text.replace(old_ckpt, new_ckpt); changed = True
+          old_print = '    print(f"Saving checkpoint at step {global_step}, {config.num_train_steps}")\n    if not is_main:\n        return\n\n    # Only save if'
+          if old_print in text:
+              text = text.replace(old_print, '    if not is_main:\n        return\n\n    # Only save if'); changed = True
+          if changed:
+              open('scripts/train_contextvla.py', 'w').write(text)
+              print('train_contextvla.py patched OK')
+          else:
+              print('train_contextvla.py already patched, skipping')
+          PYEOF
+
+          huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential
+          mkdir -p "$CKPT_DIR"
+          echo "=== [ctx8] Starting training ==="
+          torchrun \
+            --standalone \
+            --nnodes=1 \
+            --nproc_per_node=4 \
+            --master_port=19001 \
+            scripts/train_contextvla.py "$CTX_CONFIG" \
+            --exp-name="$EXP_NAME" \
+            --num-train-steps=10000 \
+            --batch-size=16 \
+            --accum-steps=2 \
+            --checkpoint-base-dir="$CKPT_DIR" \
+            --no-resume
+          echo "=== [ctx8] Training complete ==="
+        volumeMounts:
+        - name: jasonkong-volume
+          mountPath: /mymnt
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: jasonkong-volume
+        persistentVolumeClaim:
+          claimName: jasonkong-volume
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: jason-ctx12-train
+  namespace: seelab
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: ctx-train
+    spec:
+      restartPolicy: Never
+      tolerations:
+      - key: nautilus.io/hardware
+        operator: Equal
+        value: large-gpu
+        effect: NoSchedule
+      containers:
+      - name: ctx-train
+        image: ghcr.io/tilmto/hymba:v1
+        resources:
+          limits:
+            nvidia.com/a100: 4
+            memory: 256Gi
+            cpu: 32
+          requests:
+            nvidia.com/a100: 4
+            memory: 256Gi
+            cpu: 32
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+        - name: MUJOCO_GL
+          value: osmesa
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+        - name: CTX
+          value: "12"
+        - name: CTX_CONFIG
+          value: "contextvla_libero_ctx12"
+        - name: EXP_NAME
+          value: "ctx12_libero"
+        - name: CKPT_DIR
+          value: "/mymnt/checkpoints/ctx_sweep/ctx12"
+        command:
+        - bash
+        - -c
+        - |
+          set -euo pipefail
+          echo "=== [ctx12] Starting setup ==="
+
+          source /workspace/miniforge3/etc/profile.d/conda.sh
+          conda create -y -n contextvla python=3.11
+          conda activate contextvla
+
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+          pip install \
+            transformers==4.53.2 safetensors wandb numpy==1.26.4 \
+            tqdm tqdm-loggable einops packaging etils beartype \
+            jaxtyping tyro pillow requests
+          pip install lerobot
+          pip install flash-attn --no-build-isolation
+
+          git clone https://github.com/jasonkongie/ContextVLA.git /workspace/ContextVLA
+          cd /workspace/ContextVLA/qwen_fast
+
+          python - << 'PYEOF'
+          import sys
+          text = open('src/models/layer_wrapper.py').read()
+          old = """    def forward(self, hidden_states, *args, **kwargs):
+              if hidden_states.shape[1] > 1:
+                  self.position_ids = kwargs['position_ids']
+                  self.cache_position = kwargs['cache_position']
+                  self.position_embeddings = kwargs['position_embeddings']"""
+          new = """    def forward(self, hidden_states, attention_mask=None, position_ids=None,
+                          past_key_value=None, output_attentions=False, use_cache=False,
+                          cache_position=None, position_embeddings=None, **kwargs):
+              if attention_mask is not None: kwargs['attention_mask'] = attention_mask
+              if position_ids is not None: kwargs['position_ids'] = position_ids
+              if cache_position is not None: kwargs['cache_position'] = cache_position
+              if position_embeddings is not None: kwargs['position_embeddings'] = position_embeddings
+              if hidden_states.shape[1] > 1:
+                  self.position_ids = kwargs.get('position_ids')
+                  self.cache_position = kwargs.get('cache_position')
+                  self.position_embeddings = kwargs.get('position_embeddings')"""
+          if old in text:
+              text = text.replace(old, new)
+              text = text.replace(
+                  '        return self.layer(hidden_states, *args, **kwargs)',
+                  '        return self.layer(hidden_states, past_key_value=past_key_value, output_attentions=output_attentions, use_cache=use_cache, **kwargs)'
+              )
+              open('src/models/layer_wrapper.py', 'w').write(text)
+              print('layer_wrapper.py patched OK')
+          else:
+              print('layer_wrapper.py already patched, skipping')
+          PYEOF
+
+          python - << 'PYEOF'
+          text = open('scripts/train_contextvla.py').read()
+          changed = False
+          if 'import datetime' not in text:
+              text = text.replace('import dataclasses\nimport gc', 'import dataclasses\nimport datetime\nimport gc')
+              changed = True
+          old_nccl = 'torch.distributed.init_process_group(backend=backend, init_method="env://")'
+          new_nccl = 'torch.distributed.init_process_group(backend=backend, init_method="env://", timeout=datetime.timedelta(seconds=3600))'
+          if old_nccl in text:
+              text = text.replace(old_nccl, new_nccl); changed = True
+          if 'model.gradient_checkpointing_enable()' in text:
+              text = text.replace('model.gradient_checkpointing_enable()', 'model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})'); changed = True
+          if 'find_unused_parameters=True' in text:
+              text = text.replace('find_unused_parameters=True', 'find_unused_parameters=False'); changed = True
+          old_ckpt = '            # Save checkpoint using the new mechanism\n            if (global_step + 1) % accum_steps == 0:\n                save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)'
+          new_ckpt = '            # Save checkpoint using the new mechanism\n            if (global_step + 1) % accum_steps == 0:\n                if use_ddp:\n                    dist.barrier()\n                save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)\n                if use_ddp:\n                    dist.barrier()'
+          if old_ckpt in text:
+              text = text.replace(old_ckpt, new_ckpt); changed = True
+          old_print = '    print(f"Saving checkpoint at step {global_step}, {config.num_train_steps}")\n    if not is_main:\n        return\n\n    # Only save if'
+          if old_print in text:
+              text = text.replace(old_print, '    if not is_main:\n        return\n\n    # Only save if'); changed = True
+          if changed:
+              open('scripts/train_contextvla.py', 'w').write(text)
+              print('train_contextvla.py patched OK')
+          else:
+              print('train_contextvla.py already patched, skipping')
+          PYEOF
+
+          huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential
+          mkdir -p "$CKPT_DIR"
+          echo "=== [ctx12] Starting training ==="
+          torchrun \
+            --standalone \
+            --nnodes=1 \
+            --nproc_per_node=4 \
+            --master_port=19001 \
+            scripts/train_contextvla.py "$CTX_CONFIG" \
+            --exp-name="$EXP_NAME" \
+            --num-train-steps=10000 \
+            --batch-size=16 \
+            --accum-steps=2 \
+            --checkpoint-base-dir="$CKPT_DIR" \
+            --no-resume
+          echo "=== [ctx12] Training complete ==="
+        volumeMounts:
+        - name: jasonkong-volume
+          mountPath: /mymnt
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: jasonkong-volume
+        persistentVolumeClaim:
+          claimName: jasonkong-volume
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
+
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: jason-ctx16-train
+  namespace: seelab
+spec:
+  backoffLimit: 0
+  template:
+    metadata:
+      labels:
+        app: ctx-train
+    spec:
+      restartPolicy: Never
+      tolerations:
+      - key: nautilus.io/hardware
+        operator: Equal
+        value: large-gpu
+        effect: NoSchedule
+      containers:
+      - name: ctx-train
+        image: ghcr.io/tilmto/hymba:v1
+        resources:
+          limits:
+            nvidia.com/a100: 4
+            memory: 256Gi
+            cpu: 32
+          requests:
+            nvidia.com/a100: 4
+            memory: 256Gi
+            cpu: 32
+        env:
+        - name: HF_TOKEN
+          valueFrom:
+            secretKeyRef:
+              name: hf-token
+              key: token
+        - name: MUJOCO_GL
+          value: osmesa
+        - name: TOKENIZERS_PARALLELISM
+          value: "false"
+        - name: CTX
+          value: "16"
+        - name: CTX_CONFIG
+          value: "contextvla_libero_ctx16"
+        - name: EXP_NAME
+          value: "ctx16_libero"
+        - name: CKPT_DIR
+          value: "/mymnt/checkpoints/ctx_sweep/ctx16"
+        command:
+        - bash
+        - -c
+        - |
+          set -euo pipefail
+          echo "=== [ctx16] Starting setup ==="
+
+          source /workspace/miniforge3/etc/profile.d/conda.sh
+          conda create -y -n contextvla python=3.11
+          conda activate contextvla
+
+          pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+          pip install \
+            transformers==4.53.2 safetensors wandb numpy==1.26.4 \
+            tqdm tqdm-loggable einops packaging etils beartype \
+            jaxtyping tyro pillow requests
+          pip install lerobot
+          pip install flash-attn --no-build-isolation
+
+          git clone https://github.com/jasonkongie/ContextVLA.git /workspace/ContextVLA
+          cd /workspace/ContextVLA/qwen_fast
+
+          python - << 'PYEOF'
+          import sys
+          text = open('src/models/layer_wrapper.py').read()
+          old = """    def forward(self, hidden_states, *args, **kwargs):
+              if hidden_states.shape[1] > 1:
+                  self.position_ids = kwargs['position_ids']
+                  self.cache_position = kwargs['cache_position']
+                  self.position_embeddings = kwargs['position_embeddings']"""
+          new = """    def forward(self, hidden_states, attention_mask=None, position_ids=None,
+                          past_key_value=None, output_attentions=False, use_cache=False,
+                          cache_position=None, position_embeddings=None, **kwargs):
+              if attention_mask is not None: kwargs['attention_mask'] = attention_mask
+              if position_ids is not None: kwargs['position_ids'] = position_ids
+              if cache_position is not None: kwargs['cache_position'] = cache_position
+              if position_embeddings is not None: kwargs['position_embeddings'] = position_embeddings
+              if hidden_states.shape[1] > 1:
+                  self.position_ids = kwargs.get('position_ids')
+                  self.cache_position = kwargs.get('cache_position')
+                  self.position_embeddings = kwargs.get('position_embeddings')"""
+          if old in text:
+              text = text.replace(old, new)
+              text = text.replace(
+                  '        return self.layer(hidden_states, *args, **kwargs)',
+                  '        return self.layer(hidden_states, past_key_value=past_key_value, output_attentions=output_attentions, use_cache=use_cache, **kwargs)'
+              )
+              open('src/models/layer_wrapper.py', 'w').write(text)
+              print('layer_wrapper.py patched OK')
+          else:
+              print('layer_wrapper.py already patched, skipping')
+          PYEOF
+
+          python - << 'PYEOF'
+          text = open('scripts/train_contextvla.py').read()
+          changed = False
+          if 'import datetime' not in text:
+              text = text.replace('import dataclasses\nimport gc', 'import dataclasses\nimport datetime\nimport gc')
+              changed = True
+          old_nccl = 'torch.distributed.init_process_group(backend=backend, init_method="env://")'
+          new_nccl = 'torch.distributed.init_process_group(backend=backend, init_method="env://", timeout=datetime.timedelta(seconds=3600))'
+          if old_nccl in text:
+              text = text.replace(old_nccl, new_nccl); changed = True
+          if 'model.gradient_checkpointing_enable()' in text:
+              text = text.replace('model.gradient_checkpointing_enable()', 'model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})'); changed = True
+          if 'find_unused_parameters=True' in text:
+              text = text.replace('find_unused_parameters=True', 'find_unused_parameters=False'); changed = True
+          old_ckpt = '            # Save checkpoint using the new mechanism\n            if (global_step + 1) % accum_steps == 0:\n                save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)'
+          new_ckpt = '            # Save checkpoint using the new mechanism\n            if (global_step + 1) % accum_steps == 0:\n                if use_ddp:\n                    dist.barrier()\n                save_checkpoint(model, optim, (global_step + 1) // accum_steps, config, is_main, data_config)\n                if use_ddp:\n                    dist.barrier()'
+          if old_ckpt in text:
+              text = text.replace(old_ckpt, new_ckpt); changed = True
+          old_print = '    print(f"Saving checkpoint at step {global_step}, {config.num_train_steps}")\n    if not is_main:\n        return\n\n    # Only save if'
+          if old_print in text:
+              text = text.replace(old_print, '    if not is_main:\n        return\n\n    # Only save if'); changed = True
+          if changed:
+              open('scripts/train_contextvla.py', 'w').write(text)
+              print('train_contextvla.py patched OK')
+          else:
+              print('train_contextvla.py already patched, skipping')
+          PYEOF
+
+          huggingface-cli login --token "$HF_TOKEN" --add-to-git-credential
+          mkdir -p "$CKPT_DIR"
+          echo "=== [ctx16] Starting training ==="
+          torchrun \
+            --standalone \
+            --nnodes=1 \
+            --nproc_per_node=4 \
+            --master_port=19001 \
+            scripts/train_contextvla.py "$CTX_CONFIG" \
+            --exp-name="$EXP_NAME" \
+            --num-train-steps=10000 \
+            --batch-size=16 \
+            --accum-steps=2 \
+            --checkpoint-base-dir="$CKPT_DIR" \
+            --no-resume
+          echo "=== [ctx16] Training complete ==="
+        volumeMounts:
+        - name: jasonkong-volume
+          mountPath: /mymnt
+        - name: dshm
+          mountPath: /dev/shm
+      volumes:
+      - name: jasonkong-volume
+        persistentVolumeClaim:
+          claimName: jasonkong-volume
+      - name: dshm
+        emptyDir:
+          medium: Memory
+          sizeLimit: 32Gi
